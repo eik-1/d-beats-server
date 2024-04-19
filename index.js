@@ -1,9 +1,24 @@
 const express = require("express");
 const cors = require("cors");
 const { ethers } = require("ethers");
-require("dotenv").config();
 var WeaveDB = require("weavedb-sdk-node");
 const axios = require("axios");
+require("dotenv").config();
+
+// Using express and cors
+const app = express();
+const corsConfig = {
+  origin: "*",
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE"],
+};
+app.options("", cors(corsConfig));
+app.use(cors(corsConfig));
+app.use(express.json());
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url}`);
+  next();
+});
 
 const nftAbi = [
   {
@@ -624,16 +639,18 @@ const wallet = {
   getAddressString: () => process.env.ADMIN_ADDRESS.toLowerCase(),
   getPrivateKey: () => Buffer.from(process.env.ADMIN_PRIVATE_KEY, "hex"),
 };
-let db;
 global.owner = process.env.ADMIN_ADDRESS;
+
 // Initialize WeaveDB
+let db;
 async function init() {
   db = new WeaveDB({ contractTxId: process.env.CONTRACT_TX_ID });
   await db.initializeWithoutWallet();
   db.setDefaultWallet(wallet, "evm");
 }
-
 init();
+
+// Alchemy Providers
 const wssProvider = new ethers.providers.WebSocketProvider(
   `wss://arb-sepolia.g.alchemy.com/v2/${process.env.ALCHEMY_ARB_SEPOLIA_KEY}`
 );
@@ -641,25 +658,69 @@ const provider = new ethers.providers.WebSocketProvider(
   `https://arb-sepolia.g.alchemy.com/v2/${process.env.ALCHEMY_ARB_SEPOLIA_KEY}`
 );
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+// Function to fetch the image URL and music file URL from the token URI
+async function fetchImageAndMusicURLs(tokenURI, retries = 0) {
+  try {
+    const httpTokenURI = tokenURI.replace(
+      "ipfs://",
+      "https://cloudflare-ipfs.com/ipfs/"
+    );
+    const metadataResponse = await axios.get(httpTokenURI);
+    const metadata = metadataResponse.data;
+    const imageURL = `https://cloudflare-ipfs.com/ipfs/${metadata.image.replace(
+      "ipfs://",
+      ""
+    )}`;
+    const musicFileURL = `${metadata.animation_url.replace(
+      "https://ipfs.io/",
+      "https://cloudflare-ipfs.com/"
+    )}`;
+    return { imageURL, musicFileURL };
+  } catch (error) {
+    throw error;
+  }
+}
 
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.url}`);
-  next();
-});
-
+/*---------------------------ENDPOINTS--------------------------------*/
 app.get("/", (req, res) => {
   res.send("Welcome to D-Beat backend!");
 });
 
 // endpoint to fetch all nfts minted
 app.get("/allNfts", async (req, res) => {
-  const result = await db.get("nfts");
-  res.status(200).json(result);
+  try {
+    const result = await db.get("nfts");
+    const formattedData = await Promise.all(
+      result.map(async (item) => {
+        const contract = new ethers.Contract(item.nftAddress, nftAbi, provider);
+        const name = await contract.name();
+        const tokenURI = await contract.tokenURI(item.tokenId);
+        const owner = await contract.ownerOf(item.tokenId);
+
+        // Fetch the image URL and music file URL from the token URI
+        const { imageURL, musicFileURL } = await fetchImageAndMusicURLs(
+          tokenURI
+        );
+
+        return {
+          nftAddress: item.nftAddress,
+          tokenId: item.tokenId,
+          price: item.price,
+          name: name,
+          imageURL: imageURL,
+          musicFileURL: musicFileURL, // Include the music file URL in the response
+          owner: owner,
+        };
+      })
+    );
+
+    res.status(200).json(formattedData);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
+// endpoint to fetch all nfts listed on marketplace
 app.get("/listed", async (req, res) => {
   try {
     const result = await db.get("listed");
@@ -692,28 +753,6 @@ app.get("/listed", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-async function fetchImageAndMusicURLs(tokenURI, retries = 0) {
-  try {
-    const httpTokenURI = tokenURI.replace(
-      "ipfs://",
-      "https://cloudflare-ipfs.com/ipfs/"
-    );
-    const metadataResponse = await axios.get(httpTokenURI);
-    const metadata = metadataResponse.data;
-    const imageURL = `https://cloudflare-ipfs.com/ipfs/${metadata.image.replace(
-      "ipfs://",
-      ""
-    )}`;
-    const musicFileURL = `${metadata.animation_url.replace(
-      "https://ipfs.io/",
-      "https://cloudflare-ipfs.com/"
-    )}`;
-    return { imageURL, musicFileURL };
-  } catch (error) {
-    throw error;
-  }
-}
 
 // endpoint to fetch all nfts cancelled
 app.get("/cancelled", async (req, res) => {
@@ -845,18 +884,17 @@ async function marketplaceListener() {
 
 marketplaceListener();
 
-// Use ES module syntax for exporting
-const factoryContract = new ethers.Contract(
-  factoryAddress,
-  factoryAbi,
-  provider
-);
+// const factoryContract = new ethers.Contract(
+//   factoryAddress,
+//   factoryAbi,
+//   provider
+// );
 
-const marketplaceContract = new ethers.Contract(
-  marketplaceAddress,
-  marketplaceAbi,
-  provider
-);
+// const marketplaceContract = new ethers.Contract(
+//   marketplaceAddress,
+//   marketplaceAbi,
+//   provider
+// );
 
 const PORT = process.env.PORT || 5000;
 
@@ -864,4 +902,4 @@ app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
 
-module.exports = { factoryContract, marketplaceContract, app };
+module.exports = app;
